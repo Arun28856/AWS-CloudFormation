@@ -1,2 +1,2 @@
 # AWS-CloudFormation
-Full Stack AWS Infra deployment using CloudFormation using YAML script
+This is a personal AWS project where I deployed a basic cloud infrastructure using a CloudFormation YAML template. The setup included a VPC, a Bastion Host EC2 instance, RDS with both Writer and Reader instances, SNS, SQS, and SES. I also implemented Lambda functions to integrate these services—specifically, triggering SES through SNS (via Lambda) to send notifications generated from RDS events.
