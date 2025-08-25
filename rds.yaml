@@ -1,0 +1,380 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  VPC, EC2, Aurora (writer + reader), SNS, SQS, SES, and connection glue.
+  Creates an Aurora DB cluster (writer + reader) and enables EC2 to publish to SNS,
+  send to SQS and send email via SES.
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 KeyPair to SSH into the Bastion/App host
+
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+
+  PublicSubnetCIDR:
+    Type: String
+    Default: 10.0.1.0/24
+
+  PrivateSubnet1CIDR:
+    Type: String
+    Default: 10.0.2.0/24
+
+  PrivateSubnet2CIDR:
+    Type: String
+    Default: 10.0.3.0/24
+
+  DBClusterIdentifier:
+    Type: String
+    Default: eds-db-cluster
+    Description: Identifier for the Aurora DB cluster
+
+  DBName:
+    Type: String
+    Default: edsdb
+    Description: Initial DB name created in the cluster
+
+  DBMasterUsername:
+    Type: String
+    Default: admin
+    Description: Master DB username
+
+  DBMasterPassword:
+    Type: String
+    NoEcho: true
+    Description: Master DB password (NoEcho true so it's not shown in console)
+
+  DBInstanceClass:
+    Type: String
+    Default: db.r7g.large
+    Description: DB instance class for both writer and reader (change if needed)
+
+Resources:
+
+  ################
+  # Networking
+  ################
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: eds-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: eds-igw
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetCIDR
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: us-east-1a
+      Tags:
+        - Key: Name
+          Value: eds-public-subnet
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      AvailabilityZone: us-east-1a
+      Tags:
+        - Key: Name
+          Value: eds-private-subnet-a
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      AvailabilityZone: us-east-1b
+      Tags:
+        - Key: Name
+          Value: eds-private-subnet-b
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: eds-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+  
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: eds-public-rt
+  
+  PrivateSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable    
+
+  ################
+  # Security groups
+  ################
+  HostInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH/HTTP from internet (for bastion/app)
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: eds-host-sg
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow DB connections from host/app security group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref HostInstanceSecurityGroup
+      Tags:
+        - Key: Name
+          Value: eds-rds-sg
+
+  ################
+  # IAM for EC2 to talk to SNS/SQS/SES
+  ################
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub eds-ec2-role-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: eds-ec2-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                  - sqs:SendMessage
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: '*'
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+      Path: /
+
+  ################
+  # EC2 Bastion / App host
+  ################
+  EC2InstanceHost:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      ImageId: ami-020cba7c55df1f615   
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref HostInstanceSecurityGroup
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      Tags:
+        - Key: Name
+          Value: "EDS-Bastion-App-Host"
+
+  ################
+  # RDS (Aurora) cluster: writer + reader
+  ################
+  RDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for Aurora cluster
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      DBSubnetGroupName: !Sub rds-subnet-${AWS::StackName}
+
+  AuroraDBCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      Engine: aurora-mysql
+      DBClusterIdentifier: !Ref DBClusterIdentifier
+      DatabaseName: !Ref DBName
+      MasterUsername: !Ref DBMasterUsername
+      MasterUserPassword: !Ref DBMasterPassword
+      DBSubnetGroupName: !Ref RDSSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref RDSSecurityGroup
+      DeletionProtection: false
+      BackupRetentionPeriod: 7
+      # Optionally tune engine version: remove or set EngineVersion if you need a specific one
+      # EngineVersion: '3.03.0'  
+
+  AuroraWriterInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub ${DBClusterIdentifier}-writer
+      DBInstanceClass: !Ref DBInstanceClass
+      Engine: aurora-mysql
+      DBClusterIdentifier: !Ref AuroraDBCluster
+      PubliclyAccessible: false
+
+  AuroraReaderInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub ${DBClusterIdentifier}-reader
+      DBInstanceClass: !Ref DBInstanceClass
+      Engine: aurora-mysql
+      DBClusterIdentifier: !Ref AuroraDBCluster
+      PubliclyAccessible: false
+
+  ################
+  # SNS, SQS, SES and wiring
+  ################
+  NotificationSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: eds-notifications
+
+  SNSSubscriptionEmail:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref NotificationSNSTopic
+      Protocol: email
+      Endpoint: arunlakshman28@gmail.com
+
+  SQSQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub eds-notification-queue-${AWS::StackName}
+
+  SQSQueuePolicyForSNS:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref SQSQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Allow-SNS-SendMessage
+            Effect: Allow
+            Principal: "*"
+            Action: "SQS:SendMessage"
+            Resource: !GetAtt SQSQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref NotificationSNSTopic
+
+  SNSSubscriptionSQS:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref NotificationSNSTopic
+      Protocol: sqs
+      Endpoint: !GetAtt SQSQueue.Arn
+  
+  SNSSubscirptionSMS:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref NotificationSNSTopic
+      Protocol: sms
+      Endpoint: +919360898874
+
+  SESIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: arunlakshman28@gmail.com
+
+
+  ################
+  # Outputs
+  ################
+Outputs:
+  EC2InstancePublicIP:
+    Description: Public IP address of EC2 bastion/app host
+    Value: !GetAtt EC2InstanceHost.PublicIp
+    # Do not export if you intend reuse across stacks; leave Export commented unless needed.
+    # Export:
+    #   Name: !Sub ${AWS::StackName}-EC2PublicIP
+
+  EC2InstancePublicDNS:
+    Description: Public DNS of EC2 bastion/app host
+    Value: !GetAtt EC2InstanceHost.PublicDnsName
+
+  AuroraClusterEndpoint:
+    Description: Writer endpoint for Aurora cluster (cluster endpoint)
+    Value: !GetAtt AuroraDBCluster.Endpoint.Address
+
+  AuroraClusterReaderEndpoint:
+    Description: Reader endpoint for Aurora cluster
+    Value: !GetAtt AuroraDBCluster.ReadEndpoint.Address
+
+  AuroraClusterIdentifier:
+    Description: Aurora DB Cluster Identifier
+    Value: !Ref AuroraDBCluster
+
+  SNSTopicARN:
+    Description: SNS Topic ARN for notifications
+    Value: !Ref NotificationSNSTopic
+
+  SQSQueueUrl:
+    Description: SQS Queue URL
+    Value: !Ref SQSQueue
+
+  SESIdentity:
+    Description: SES Email Identity in this stack (verify in SES console if needed)
+    Value: !Ref SESIdentity
