@@ -1,0 +1,18 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ses:SendEmail",
+        "ses:SendRawEmail"
+      ],
+      "Resource": "arn:aws:ses:us-east-1:637423266350:identity/arunlakshman28@gmail.com"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "logs:*",
+      "Resource": "arn:aws:logs:*:*:*"   
+    }
+  ]
+}
