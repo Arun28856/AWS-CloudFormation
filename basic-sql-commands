@@ -1,0 +1,17 @@
+CREATE DATABASE ratings; 
+USE ratings; 
+SELECT DATABASE(); 
+SHOW TABLES;
+
+CREATE TABLE ratings (author VARCHAR(20), rating TINYINT, timerated DATETIME);
+
+SHOW TABLES;
+
+DESCRIBE ratings;
+
+INSERT INTO ratings ( author, rating, timerated ) VALUES ( "Muthu Lakshmi", 10, "2018-06-26 10:06:47"), ( "Anatha Lakshmi", 10, "2018-06-23 10:06:27");
+
+
+SELECT * FROM ratings;
+
+exit
