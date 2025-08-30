@@ -1,0 +1,3 @@
+sudo apt install mysql-server //sql installation on Ubuntu Machine
+sudo service start mysql //starting mysql server
+mysql -h <rds.endpoint.url> -P 3306 -u <username> -p <pass>
